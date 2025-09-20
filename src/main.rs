@@ -1,16 +1,16 @@
-use anyhow::bail;
-use anyhow::ensure;
-use anyhow::Result;
+use anyhow::{bail, ensure, Result};
 use flate2::read::ZlibDecoder;
-use std::env;
+use flate2::write::ZlibEncoder;
+use flate2::Compression;
+use sha1::{Digest, Sha1};
 use std::ffi::CStr;
-use std::fs;
-use std::io::stdout;
-use std::io::BufRead;
-use std::io::BufReader;
-use std::io::Read;
-use std::io::Write;
-use std::path::Path;
+use std::fs::File;
+use std::{env, io, process};
+use std::{
+    fs,
+    io::{stdout, BufRead, BufReader, Read, Write},
+    path::Path,
+};
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -48,10 +48,56 @@ fn main() -> Result<()> {
 
             stdout().write_all(&buf)?;
         }
+        "hash-object" => {
+            let path = Path::new(&args[3]);
+            let size = fs::metadata(path)?.len();
+
+            let mut file = File::open(path)?;
+
+            let tmp_path = Path::new(".git/objects").join(format!("tmp-{}", process::id()));
+            let tmp_file = File::create(&tmp_path)?;
+
+            let mut writer = HashWriter {
+                writer: ZlibEncoder::new(tmp_file, Compression::default()),
+                hasher: Sha1::new(),
+            };
+
+            let header = format!("blob {}\0", size);
+
+            writer.write(header.as_bytes())?;
+            io::copy(&mut file, &mut writer)?;
+
+            writer.writer.finish()?;
+            let hash = format!("{:x}", writer.hasher.finalize());
+
+            let dir_path = Path::new(".git/objects").join(&hash[..2]);
+            fs::create_dir_all(&dir_path)?;
+
+            fs::rename(tmp_path, dir_path.join(&hash[2..]))?;
+
+            println!("{hash}");
+        }
         _ => {
             bail!("unknown command: {}", args[1]);
         }
     }
 
     Ok(())
+}
+
+struct HashWriter<W> {
+    writer: W,
+    hasher: Sha1,
+}
+
+impl<W: Write> Write for HashWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.writer.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
 }
