@@ -1,10 +1,12 @@
-use anyhow::{bail, ensure, Result};
+use anyhow::{bail, Result};
+use clap::{Args, Parser, Subcommand};
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use sha1::{Digest, Sha1};
 use std::ffi::CStr;
 use std::fs::File;
+use std::path::PathBuf;
 use std::{env, io, process};
 use std::{
     fs,
@@ -12,12 +14,38 @@ use std::{
     path::Path,
 };
 
-fn main() -> Result<()> {
-    let args: Vec<String> = env::args().collect();
-    ensure!(args.len() > 1, "Usage: git <command>");
+#[derive(Parser)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
 
-    match args[1].as_str() {
-        "init" => {
+#[derive(Subcommand)]
+enum Command {
+    Init,
+    CatFile(CatFileArgs),
+    HashObject(HashObjectArgs),
+}
+
+#[derive(Args)]
+struct CatFileArgs {
+    #[arg(short, required = true)]
+    pretty_print: bool,
+    hash: String,
+}
+
+#[derive(Args)]
+struct HashObjectArgs {
+    #[arg(short, required = true)]
+    write: bool,
+    path: PathBuf,
+}
+
+fn main() -> Result<()> {
+    let args = Cli::parse();
+
+    match &args.command {
+        Command::Init => {
             fs::create_dir(".git")?;
             fs::create_dir(".git/objects")?;
             fs::create_dir(".git/refs")?;
@@ -27,8 +55,7 @@ fn main() -> Result<()> {
                 env::current_dir()?.display()
             );
         }
-        "cat-file" => {
-            let hash = &args[3];
+        Command::CatFile(CatFileArgs { hash, .. }) => {
             let path = Path::new(".git/objects").join(&hash[..2]).join(&hash[2..]);
             let object = fs::read(path)?;
 
@@ -48,10 +75,8 @@ fn main() -> Result<()> {
 
             stdout().write_all(&buf)?;
         }
-        "hash-object" => {
-            let path = Path::new(&args[3]);
-            let size = fs::metadata(path)?.len();
-
+        Command::HashObject(HashObjectArgs { path, .. }) => {
+            let size = fs::metadata(&path)?.len();
             let mut file = File::open(path)?;
 
             let tmp_path = Path::new(".git/objects").join(format!("tmp-{}", process::id()));
@@ -77,11 +102,7 @@ fn main() -> Result<()> {
 
             println!("{hash}");
         }
-        _ => {
-            bail!("unknown command: {}", args[1]);
-        }
     }
-
     Ok(())
 }
 
