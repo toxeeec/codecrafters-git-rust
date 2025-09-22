@@ -1,18 +1,20 @@
+mod object;
+
 use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
-use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use sha1::{Digest, Sha1};
-use std::ffi::CStr;
 use std::fs::File;
 use std::path::PathBuf;
 use std::{env, io, process};
 use std::{
     fs,
-    io::{stdout, BufRead, BufReader, Read, Write},
+    io::{stdout, Write},
     path::Path,
 };
+
+use crate::object::Object;
 
 #[derive(Parser)]
 struct Cli {
@@ -25,6 +27,7 @@ enum Command {
     Init,
     CatFile(CatFileArgs),
     HashObject(HashObjectArgs),
+    LsTree(LsTreeArgs),
 }
 
 #[derive(Args)]
@@ -41,6 +44,13 @@ struct HashObjectArgs {
     path: PathBuf,
 }
 
+#[derive(Args)]
+struct LsTreeArgs {
+    #[arg(long)]
+    name_only: bool,
+    hash: String,
+}
+
 fn main() -> Result<()> {
     let args = Cli::parse();
 
@@ -55,31 +65,17 @@ fn main() -> Result<()> {
                 env::current_dir()?.display()
             );
         }
-        Command::CatFile(CatFileArgs { hash, .. }) => {
-            let path = Path::new(".git/objects").join(&hash[..2]).join(&hash[2..]);
-            let object = fs::read(path)?;
-
-            let mut z = BufReader::new(ZlibDecoder::new(object.as_slice()));
-            let mut buf = Vec::new();
-            z.read_until(b'\0', &mut buf).unwrap();
-
-            let header = CStr::from_bytes_with_nul(&buf)?.to_str()?;
-            let (object_type, size) = header.split_once(' ').unwrap();
-            if object_type != "blob" {
-                bail!("Unknown object type: {object_type}");
+        Command::CatFile(CatFileArgs { hash, .. }) => match Object::from_hash(hash)? {
+            Object::Blob(mut buf) => {
+                io::copy(&mut buf, &mut stdout().lock())?;
             }
-            let size = size.parse::<usize>()?;
-
-            buf.resize(size, 0);
-            z.read_exact(&mut buf)?;
-
-            stdout().write_all(&buf)?;
-        }
+            _ => bail!("Not a blob"),
+        },
         Command::HashObject(HashObjectArgs { path, .. }) => {
             let size = fs::metadata(&path)?.len();
             let mut file = File::open(path)?;
 
-            let tmp_path = Path::new(".git/objects").join(format!("tmp-{}", process::id()));
+            let tmp_path = format!(".git/objects/tmp-{}", process::id());
             let tmp_file = File::create(&tmp_path)?;
 
             let mut writer = HashWriter {
@@ -89,7 +85,7 @@ fn main() -> Result<()> {
 
             let header = format!("blob {}\0", size);
 
-            writer.write(header.as_bytes())?;
+            writer.write_all(header.as_bytes())?;
             io::copy(&mut file, &mut writer)?;
 
             writer.writer.finish()?;
@@ -102,6 +98,27 @@ fn main() -> Result<()> {
 
             println!("{hash}");
         }
+        Command::LsTree(LsTreeArgs { name_only, hash }) => match Object::from_hash(hash)? {
+            Object::Tree(tree) => {
+                let mut stdout = stdout().lock();
+                for entry in &tree {
+                    if *name_only {
+                        stdout.write_all(entry.name)?;
+                    } else {
+                        write!(
+                            stdout,
+                            "{:0>6} {} {}\t",
+                            entry.mode,
+                            entry.typ(),
+                            entry.hash()
+                        )?;
+                        stdout.write_all(entry.name)?;
+                    }
+                    writeln!(stdout, "")?;
+                }
+            }
+            _ => bail!("Not a tree"),
+        },
     }
     Ok(())
 }
