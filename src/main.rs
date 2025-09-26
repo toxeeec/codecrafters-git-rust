@@ -11,7 +11,7 @@ use std::{
     io::{stdout, Write},
 };
 
-use crate::object::{write_blob, write_tree, Kind, Object, TreeIterator};
+use crate::object::{write_blob, write_commit, write_tree, Kind, Object, TreeIterator};
 
 #[derive(Parser)]
 struct Cli {
@@ -26,6 +26,7 @@ enum Command {
     HashObject(HashObjectArgs),
     LsTree(LsTreeArgs),
     WriteTree,
+    CommitTree(CommitTreeArgs),
 }
 
 #[derive(Args)]
@@ -49,6 +50,15 @@ struct LsTreeArgs {
     hash: String,
 }
 
+#[derive(Args)]
+struct CommitTreeArgs {
+    hash: String,
+    #[arg(short)]
+    message: String,
+    #[arg(short)]
+    parent: Option<String>,
+}
+
 fn main() -> Result<()> {
     let args = Cli::parse();
 
@@ -67,7 +77,7 @@ fn main() -> Result<()> {
             let mut object = Object::read(hash)?;
             match object.kind {
                 Kind::Blob => io::copy(&mut object.reader, &mut stdout().lock())?,
-                Kind::Tree => bail!("Not a blob"),
+                _ => bail!("Not a blob"),
             };
         }
         Command::HashObject(HashObjectArgs { path, .. }) => {
@@ -101,6 +111,14 @@ fn main() -> Result<()> {
         }
         Command::WriteTree => {
             let hash = write_tree(Path::new("."))?;
+            println!("{}", hex::encode(hash));
+        }
+        Command::CommitTree(CommitTreeArgs {
+            hash,
+            message,
+            parent,
+        }) => {
+            let hash = write_commit(hash, message, parent.as_deref())?;
             println!("{}", hex::encode(hash));
         }
     }

@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use fallible_iterator::FallibleIterator;
 use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
 use sha1::{Digest, Sha1};
+use std::fmt::Write as FmtWrite;
 use std::{
     collections::BTreeSet,
     ffi::CStr,
@@ -9,15 +10,18 @@ use std::{
     fs::File,
     io::{self, BufRead, BufReader, Cursor, Read, Write},
     process,
+    time::{SystemTime, UNIX_EPOCH},
 };
 use std::{fs, path::Path};
+use time::{macros::format_description, OffsetDateTime};
 
 use crate::tree_entry::TreeEntry;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     Blob,
     Tree,
+    Commit,
 }
 
 #[derive(Debug)]
@@ -45,6 +49,7 @@ impl TryFrom<&str> for Kind {
         match value {
             "blob" => Ok(Kind::Blob),
             "tree" => Ok(Kind::Tree),
+            "commit" => Ok(Kind::Commit),
             _ => bail!("Unkown kind: {}", value),
         }
     }
@@ -55,6 +60,7 @@ impl fmt::Display for Kind {
         match self {
             Kind::Blob => f.write_str("blob"),
             Kind::Tree => f.write_str("tree"),
+            Kind::Commit => f.write_str("commit"),
         }
     }
 }
@@ -200,14 +206,51 @@ pub(crate) fn write_tree(path: &Path) -> Result<[u8; 20]> {
         buf.extend_from_slice(&entry.hash);
     }
 
-    let size = buf.len() as u64;
-
     let object = Object {
         kind: Kind::Tree,
+        size: buf.len() as u64,
         reader: Cursor::new(buf),
-        size,
     };
 
-    let hash = object.write()?;
-    Ok(hash)
+    object.write()
+}
+
+pub(crate) fn write_commit(hash: &str, message: &str, parent: Option<&str>) -> Result<[u8; 20]> {
+    let object = Object::read(hash)?;
+    if object.kind != Kind::Tree {
+        bail!("Not a tree");
+    }
+    let mut buf = String::new();
+
+    writeln!(buf, "tree {hash}")?;
+
+    if let Some(parent) = parent {
+        writeln!(buf, "parent {parent}")?;
+    }
+
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+
+    let local = OffsetDateTime::now_local()?;
+    let timezone = local.format(&format_description!(
+        "[offset_hour sign:mandatory][offset_minute]"
+    ))?;
+
+    writeln!(
+        buf,
+        "author toxeeec <bartosz.kapciak@gmail.com> {timestamp} {timezone}",
+    )?;
+    writeln!(
+        buf,
+        "commiter toxeeec <bartosz.kapciak@gmail.com> {timestamp} {timezone}",
+    )?;
+    writeln!(buf, "")?;
+    writeln!(buf, "{message}")?;
+
+    let object = Object {
+        kind: Kind::Commit,
+        size: buf.len() as u64,
+        reader: Cursor::new(buf),
+    };
+
+    object.write()
 }

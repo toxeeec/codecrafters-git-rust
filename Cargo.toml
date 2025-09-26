@@ -12,3 +12,4 @@ fallible-iterator = "0.3.0"
 flate2 = "1.0.34"
 hex = "0.4.3"
 sha1 = "0.10.6"
+time = { version = "0.3.41", features = ["formatting", "local-offset", "macros"] }
