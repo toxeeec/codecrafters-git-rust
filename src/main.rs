@@ -1,20 +1,17 @@
 mod object;
+mod tree_entry;
 
 use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
-use flate2::write::ZlibEncoder;
-use flate2::Compression;
-use sha1::{Digest, Sha1};
-use std::fs::File;
-use std::path::PathBuf;
-use std::{env, io, process};
+use fallible_iterator::FallibleIterator;
+use std::path::{Path, PathBuf};
+use std::{env, io};
 use std::{
     fs,
     io::{stdout, Write},
-    path::Path,
 };
 
-use crate::object::Object;
+use crate::object::{write_blob, write_tree, Kind, Object, TreeIterator};
 
 #[derive(Parser)]
 struct Cli {
@@ -28,6 +25,7 @@ enum Command {
     CatFile(CatFileArgs),
     HashObject(HashObjectArgs),
     LsTree(LsTreeArgs),
+    WriteTree,
 }
 
 #[derive(Args)]
@@ -65,77 +63,46 @@ fn main() -> Result<()> {
                 env::current_dir()?.display()
             );
         }
-        Command::CatFile(CatFileArgs { hash, .. }) => match Object::from_hash(hash)? {
-            Object::Blob(mut buf) => {
-                io::copy(&mut buf, &mut stdout().lock())?;
-            }
-            _ => bail!("Not a blob"),
-        },
-        Command::HashObject(HashObjectArgs { path, .. }) => {
-            let size = fs::metadata(&path)?.len();
-            let mut file = File::open(path)?;
-
-            let tmp_path = format!(".git/objects/tmp-{}", process::id());
-            let tmp_file = File::create(&tmp_path)?;
-
-            let mut writer = HashWriter {
-                writer: ZlibEncoder::new(tmp_file, Compression::default()),
-                hasher: Sha1::new(),
+        Command::CatFile(CatFileArgs { hash, .. }) => {
+            let mut object = Object::read(hash)?;
+            match object.kind {
+                Kind::Blob => io::copy(&mut object.reader, &mut stdout().lock())?,
+                Kind::Tree => bail!("Not a blob"),
             };
-
-            let header = format!("blob {}\0", size);
-
-            writer.write_all(header.as_bytes())?;
-            io::copy(&mut file, &mut writer)?;
-
-            writer.writer.finish()?;
-            let hash = format!("{:x}", writer.hasher.finalize());
-
-            let dir_path = Path::new(".git/objects").join(&hash[..2]);
-            fs::create_dir_all(&dir_path)?;
-
-            fs::rename(tmp_path, dir_path.join(&hash[2..]))?;
-
-            println!("{hash}");
         }
-        Command::LsTree(LsTreeArgs { name_only, hash }) => match Object::from_hash(hash)? {
-            Object::Tree(tree) => {
-                let mut stdout = stdout().lock();
-                for entry in &tree {
-                    if *name_only {
-                        stdout.write_all(entry.name)?;
-                    } else {
-                        write!(
-                            stdout,
-                            "{:0>6} {} {}\t",
-                            entry.mode,
-                            entry.typ(),
-                            entry.hash()
-                        )?;
-                        stdout.write_all(entry.name)?;
-                    }
-                    writeln!(stdout, "")?;
+        Command::HashObject(HashObjectArgs { path, .. }) => {
+            let hash = write_blob(path)?;
+            println!("{}", hex::encode(hash));
+        }
+        Command::LsTree(LsTreeArgs { name_only, hash }) => {
+            let object = Object::read(hash)?;
+            match object.kind {
+                Kind::Tree => {
+                    let mut stdout = stdout().lock();
+                    TreeIterator::new(object.reader).for_each(|entry| {
+                        if *name_only {
+                            stdout.write_all(&entry.name)?
+                        } else {
+                            write!(
+                                stdout,
+                                "{:06o} {} {}\t",
+                                entry.mode,
+                                entry.object_type(),
+                                hex::encode(entry.hash)
+                            )?;
+                            stdout.write_all(&entry.name)?;
+                        }
+                        writeln!(stdout, "")?;
+                        Ok(())
+                    })?;
                 }
+                _ => bail!("Not a tree"),
             }
-            _ => bail!("Not a tree"),
-        },
+        }
+        Command::WriteTree => {
+            let hash = write_tree(Path::new("."))?;
+            println!("{}", hex::encode(hash));
+        }
     }
     Ok(())
-}
-
-struct HashWriter<W> {
-    writer: W,
-    hasher: Sha1,
-}
-
-impl<W: Write> Write for HashWriter<W> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let n = self.writer.write(buf)?;
-        self.hasher.update(&buf[..n]);
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.writer.flush()
-    }
 }
